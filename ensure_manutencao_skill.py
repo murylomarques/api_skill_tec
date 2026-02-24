@@ -237,6 +237,12 @@ def sf_login_or_die():
     instance_url = token_data.get("instance_url") or SF_DOMAIN
     return instance_url, headers
 
+def sf_login_for_api():
+    try:
+        return sf_login_or_die()
+    except SystemExit as e:
+        raise RuntimeError(str(e))
+
 
 # =========================
 # SKILLS / GRUPOS (RESOLVE MasterLabel -> SkillId)
@@ -780,7 +786,7 @@ def create_api_app():
         if not email:
             return jsonify({"result": False, "error": "Campo 'email' é obrigatório"}), 400
         try:
-            instance_url, headers = sf_login_or_die()
+            instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             return jsonify({"result": bool(sr)})
         except Exception as e:
@@ -795,7 +801,7 @@ def create_api_app():
         if not email or not grupo:
             return jsonify({"result": False, "error": "Campos 'email' e 'grupo' são obrigatórios"}), 400
         try:
-            instance_url, headers = sf_login_or_die()
+            instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
                 return jsonify({"result": False, "error": "Técnico não encontrado"}), 404
@@ -812,7 +818,7 @@ def create_api_app():
         if not email or not grupo:
             return jsonify({"result": False, "error": "Campos 'email' e 'grupo' são obrigatórios"}), 400
         try:
-            instance_url, headers = sf_login_or_die()
+            instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
                 return jsonify({"result": False, "error": "Técnico não encontrado"}), 404
@@ -827,7 +833,7 @@ def create_api_app():
         if not email:
             return jsonify({"result": False, "error": "Query param 'email' é obrigatório"}), 400
         try:
-            instance_url, headers = sf_login_or_die()
+            instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
                 return jsonify({"result": False, "found": False})
