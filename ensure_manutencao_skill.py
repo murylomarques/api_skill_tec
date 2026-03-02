@@ -831,20 +831,17 @@ def create_api_app():
     def tecnico_consultar():
         email = (request.args.get("email") or "").strip()
         if not email:
-            return Response("Campo obrigatório: email", status=400, mimetype="text/plain; charset=utf-8")
+            return jsonify([]), 400
         try:
             instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
-                return Response("Técnico não encontrado", status=404, mimetype="text/plain; charset=utf-8")
+                return jsonify([]), 200
             consulta = consult_technician(instance_url, headers, sr["id"])
             skills_nomes = consulta.get("skills", [])
-            if not skills_nomes:
-                return Response("Sem skills", status=200, mimetype="text/plain; charset=utf-8")
-            skills_text = "\n".join(skills_nomes)
-            return Response(skills_text, status=200, mimetype="text/plain; charset=utf-8")
+            return jsonify(skills_nomes), 200
         except Exception as e:
-            return Response(f"Erro: {str(e)}", status=500, mimetype="text/plain; charset=utf-8")
+            return jsonify([]), 500
 
     return app
 
