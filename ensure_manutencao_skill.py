@@ -25,7 +25,7 @@ import requests
 from datetime import datetime, timezone
 from typing import Optional
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 # opcional: se tiver python-dotenv instalado
 try:
@@ -831,29 +831,20 @@ def create_api_app():
     def tecnico_consultar():
         email = (request.args.get("email") or "").strip()
         if not email:
-            return jsonify({"result": False, "error": "Query param 'email' é obrigatório"}), 400
+            return Response("Campo obrigatório: email", status=400, mimetype="text/plain; charset=utf-8")
         try:
             instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
-                return jsonify({"result": False, "found": False})
+                return Response("Técnico não encontrado", status=404, mimetype="text/plain; charset=utf-8")
             consulta = consult_technician(instance_url, headers, sr["id"])
             skills_nomes = consulta.get("skills", [])
-            return jsonify(
-                {
-                    "result": True,
-                    "found": True,
-                    "tecnico": {
-                        "id": sr["id"],
-                        "nome": sr["name"],
-                        "email": sr.get("email") or email,
-                        "ativo": sr["is_active"],
-                    },
-                    "skills": skills_nomes,
-                }
-            )
+            if not skills_nomes:
+                return Response("Sem skills", status=200, mimetype="text/plain; charset=utf-8")
+            skills_text = "\n".join(skills_nomes)
+            return Response(skills_text, status=200, mimetype="text/plain; charset=utf-8")
         except Exception as e:
-            return jsonify({"result": False, "error": str(e)}), 500
+            return Response(f"Erro: {str(e)}", status=500, mimetype="text/plain; charset=utf-8")
 
     return app
 
