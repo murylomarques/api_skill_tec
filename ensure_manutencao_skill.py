@@ -27,7 +27,7 @@ import binascii
 import json
 import re
 import unicodedata
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, unquote_plus
 import requests
 from datetime import datetime, timezone
 from typing import Optional
@@ -816,6 +816,35 @@ def create_api_app():
 
         return value
 
+    def _extract_url_candidate(raw_text: str) -> str:
+        text = (raw_text or "").strip()
+        if not text:
+            return ""
+
+        text = text.replace("\\/", "/")
+
+        m_url = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+        if m_url:
+            return _sanitize_image_input(m_url.group(0))
+
+        m_enc = re.search(r"https?%3A%2F%2F[A-Za-z0-9%._~:/?#\[\]@!$&'()*+,;=-]+", text, flags=re.IGNORECASE)
+        if m_enc:
+            return _sanitize_image_input(unquote(m_enc.group(0)))
+
+        # fallback para payload tipo querystring/form-urlencoded
+        try:
+            parsed = parse_qs(text, keep_blank_values=True)
+            for key in ("image_url", "img_url", "imageUrl", "url", "file_url"):
+                vals = parsed.get(key) or []
+                for val in vals:
+                    candidate = _sanitize_image_input(unquote_plus(val))
+                    if candidate:
+                        return candidate
+        except Exception:
+            pass
+
+        return ""
+
     def _infer_image_type_from_bytes(data: bytes) -> str:
         if not data:
             return ""
@@ -1022,7 +1051,7 @@ def create_api_app():
 
         # fallback: alguns conectores enviam texto cru em vez de JSON.
         if not image_input and raw_payload:
-            image_input = raw_payload.strip()
+            image_input = _extract_url_candidate(raw_payload) or raw_payload.strip()
         mime_type = (body.get("mime_type") or "").strip()
         image_headers = body.get("image_headers") or {}
 
@@ -1039,7 +1068,17 @@ def create_api_app():
             ), 400
 
         try:
-            image_bytes = _decode_image_bytes(image_input, mime_type, extra_headers=image_headers)
+            try:
+                image_bytes = _decode_image_bytes(image_input, mime_type, extra_headers=image_headers)
+                if not image_bytes:
+                    raise ValueError("imagem vazia")
+            except Exception:
+                fallback_url = _extract_url_candidate(raw_payload)
+                if fallback_url and fallback_url != image_input:
+                    image_bytes = _decode_image_bytes(fallback_url, mime_type, extra_headers=image_headers)
+                else:
+                    raise
+
             raw_text = _ocr_extract_text(image_bytes)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
