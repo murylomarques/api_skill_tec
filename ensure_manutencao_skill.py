@@ -831,20 +831,49 @@ def create_api_app():
     def tecnico_consultar():
         email = (request.args.get("email") or "").strip()
         if not email:
-            return Response("{}", status=400, mimetype="text/plain; charset=utf-8")
+            return jsonify(
+                {
+                    "result": False,
+                    "found": False,
+                    "error": "Query param 'email' é obrigatório",
+                    "skills": [],
+                }
+            ), 400
         try:
             instance_url, headers = sf_login_for_api()
             sr = resolve_service_resource_by_email(instance_url, headers, email)
             if not sr:
-                return Response("{}", status=200, mimetype="text/plain; charset=utf-8")
+                return jsonify(
+                    {
+                        "result": True,
+                        "found": False,
+                        "skills": [],
+                    }
+                ), 200
             consulta = consult_technician(instance_url, headers, sr["id"])
             skills_nomes = consulta.get("skills", [])
-            if not skills_nomes:
-                return Response("{}", status=200, mimetype="text/plain; charset=utf-8")
-            skills_text = "{" + ", ".join(skills_nomes) + "}"
-            return Response(skills_text, status=200, mimetype="text/plain; charset=utf-8")
+            return jsonify(
+                {
+                    "result": True,
+                    "found": True,
+                    "tecnico": {
+                        "id": sr["id"],
+                        "nome": sr["name"],
+                        "email": sr.get("email") or email,
+                        "ativo": sr["is_active"],
+                    },
+                    "skills": skills_nomes,
+                }
+            ), 200
         except Exception as e:
-            return Response("{}", status=500, mimetype="text/plain; charset=utf-8")
+            return jsonify(
+                {
+                    "result": False,
+                    "found": False,
+                    "error": str(e),
+                    "skills": [],
+                }
+            ), 500
 
     return app
 
