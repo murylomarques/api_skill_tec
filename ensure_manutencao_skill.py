@@ -808,8 +808,14 @@ def create_api_app():
             return "image/webp"
         return ""
 
-    def _download_image_bytes_from_url(image_url: str, mime_type: str):
-        resp = requests.get(image_url, timeout=20, headers={"Accept": "image/*,*/*"})
+    def _download_image_bytes_from_url(image_url: str, mime_type: str, extra_headers: Optional[dict] = None):
+        req_headers = {"Accept": "image/*,*/*", "User-Agent": "Mozilla/5.0"}
+        if isinstance(extra_headers, dict):
+            for k, v in extra_headers.items():
+                if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+                    req_headers[k.strip()] = v.strip()
+
+        resp = requests.get(image_url, timeout=20, headers=req_headers)
         resp.raise_for_status()
         payload = resp.content
         content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -837,7 +843,7 @@ def create_api_app():
 
         raise ValueError("arquivo recebido nao parece ser imagem")
 
-    def _decode_image_bytes(image_input: str, mime_type: str):
+    def _decode_image_bytes(image_input: str, mime_type: str, extra_headers: Optional[dict] = None):
         normalized = _sanitize_image_input(image_input)
         if not normalized:
             raise ValueError("campo 'image_url' vazio")
@@ -847,7 +853,7 @@ def create_api_app():
             raise ValueError("placeholders nao resolvidos no campo 'image_url'")
 
         if normalized.startswith(("http://", "https://")):
-            return _download_image_bytes_from_url(normalized, mime_type)
+            return _download_image_bytes_from_url(normalized, mime_type, extra_headers=extra_headers)
 
         # data URI: data:image/png;base64,AAAA...
         if normalized.startswith("data:"):
@@ -963,6 +969,7 @@ def create_api_app():
         body = request.get_json(silent=True) or {}
         image_input = (body.get("image_url") or "").strip()
         mime_type = (body.get("mime_type") or "").strip()
+        image_headers = body.get("image_headers") or {}
 
         if not image_input:
             return jsonify(
@@ -977,7 +984,7 @@ def create_api_app():
             ), 400
 
         try:
-            image_bytes = _decode_image_bytes(image_input, mime_type)
+            image_bytes = _decode_image_bytes(image_input, mime_type, extra_headers=image_headers)
             raw_text = _ocr_extract_text(image_bytes)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
