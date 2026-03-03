@@ -21,6 +21,9 @@
 
 import os
 import argparse
+import io
+import re
+import unicodedata
 import requests
 from datetime import datetime, timezone
 from typing import Optional
@@ -764,6 +767,105 @@ def execute(plan, instance_url, headers, mode, desired_id_to_label, skill_level)
 def create_api_app():
     app = Flask(__name__)
 
+    def _normalize_text(text: str) -> str:
+        no_accents = "".join(
+            ch for ch in unicodedata.normalize("NFD", text or "")
+            if unicodedata.category(ch) != "Mn"
+        )
+        return re.sub(r"\s+", " ", no_accents).strip().upper()
+
+    def _download_image_bytes(image_url: str, mime_type: str):
+        resp = requests.get(image_url, timeout=20)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        expected = (mime_type or "").strip().lower()
+
+        if expected and content_type and expected != content_type:
+            # aceita mismatch comum (ex: image/jpg vs image/jpeg)
+            if not (expected.replace("jpg", "jpeg") == content_type.replace("jpg", "jpeg")):
+                raise ValueError(f"mime_type divergente: esperado {expected}, recebido {content_type}")
+
+        if not content_type.startswith("image/") and expected and not expected.startswith("image/"):
+            raise ValueError("arquivo recebido nao parece ser imagem")
+
+        return resp.content
+
+    def _ocr_extract_text(image_bytes: bytes) -> str:
+        try:
+            from PIL import Image, ImageOps
+            import pytesseract
+        except Exception:
+            return ""
+
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            # OCR simples com conversao para escala de cinza e autocontraste.
+            gray = ImageOps.grayscale(img)
+            enhanced = ImageOps.autocontrast(gray)
+            text = pytesseract.image_to_string(enhanced, lang="por+eng")
+            return text or ""
+        except Exception:
+            return ""
+
+    def _extract_fields(raw_text: str) -> dict:
+        fields = {}
+        compact = " ".join((raw_text or "").split())
+
+        m_data = re.search(r"\b(\d{2}[\/\-]\d{2}[\/\-]\d{2,4})\b", compact)
+        if m_data:
+            fields["data"] = m_data.group(1)
+
+        patr_candidates = re.findall(r"\b[A-Z0-9]{2,}[\/\-][A-Z0-9]{2,}\b", compact.upper())
+        if patr_candidates:
+            fields["patrimonio"] = patr_candidates[0]
+
+        lines = [ln.strip() for ln in (raw_text or "").splitlines() if ln.strip()]
+        for idx, line in enumerate(lines):
+            upper = _normalize_text(line)
+            if "NOME" in upper and idx + 1 < len(lines):
+                candidate = lines[idx + 1].strip()
+                if len(candidate) >= 3:
+                    fields["nome"] = candidate[:120]
+                    break
+
+        return fields
+
+    def _score_receipt_like(raw_text: str):
+        norm = _normalize_text(raw_text)
+        motivos = []
+
+        base_markers = [
+            ("RETIRADA DE EQUIPAMENTO", 0.35, "titulo 'RETIRADA DE EQUIPAMENTO' encontrado"),
+            ("DESKTOP", 0.15, "marca/cabecalho 'DESKTOP' encontrado"),
+            ("CONDICAO DE DEVOLUCAO", 0.15, "secao de condicao/devolucao encontrada"),
+            ("ASSINATURA DO CLIENTE", 0.10, "campo de assinatura encontrado"),
+            ("NUMERO(S) PATRIMONIO", 0.10, "campo patrimonio encontrado"),
+            ("DATA", 0.05, "campo data encontrado"),
+            ("NOME", 0.10, "campo nome encontrado"),
+        ]
+
+        score = 0.0
+        for token, weight, reason in base_markers:
+            if token in norm:
+                score += weight
+                motivos.append(reason)
+
+        m_data = re.search(r"\b\d{2}[\/\-]\d{2}[\/\-]\d{2,4}\b", norm)
+        if m_data:
+            score += 0.05
+            motivos.append("padrao de data detectado")
+
+        if "RETIRADA" not in norm or "EQUIPAMENTO" not in norm:
+            motivos.append("faltou termo-chave de retirada/equipamento")
+            score = min(score, 0.49)
+
+        score = min(score, 1.0)
+        valido = score >= 0.60
+        if not raw_text.strip():
+            motivos = ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+            return False, 0.0, motivos
+        return valido, score, motivos
+
     @app.after_request
     def add_cors_headers(resp):
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -778,6 +880,54 @@ def create_api_app():
     @app.get("/api/health")
     def health():
         return jsonify({"ok": True})
+
+    @app.post("/validar-comprovante")
+    @app.post("/api/validar-comprovante")
+    def validar_comprovante():
+        body = request.get_json(silent=True) or {}
+        image_url = (body.get("image_url") or "").strip()
+        mime_type = (body.get("mime_type") or "").strip()
+
+        if not image_url:
+            return jsonify(
+                {
+                    "ok": False,
+                    "valido": False,
+                    "score": 0.0,
+                    "motivos": ["campo 'image_url' e obrigatorio"],
+                    "texto_detectado": "",
+                    "campos": {},
+                }
+            ), 400
+
+        try:
+            image_bytes = _download_image_bytes(image_url, mime_type)
+            raw_text = _ocr_extract_text(image_bytes)
+            valido, score, motivos = _score_receipt_like(raw_text)
+            campos = _extract_fields(raw_text)
+            texto_curto = " ".join(raw_text.split())[:280]
+
+            return jsonify(
+                {
+                    "ok": True,
+                    "valido": bool(valido),
+                    "score": round(float(score), 4),
+                    "motivos": motivos[:8],
+                    "texto_detectado": texto_curto,
+                    "campos": campos,
+                }
+            ), 200
+        except Exception as e:
+            return jsonify(
+                {
+                    "ok": False,
+                    "valido": False,
+                    "score": 0.0,
+                    "motivos": [f"erro ao validar comprovante: {str(e)}"],
+                    "texto_detectado": "",
+                    "campos": {},
+                }
+            ), 500
 
     @app.post("/api/tecnico/existe")
     def tecnico_existe():
