@@ -936,13 +936,104 @@ def create_api_app():
 
         try:
             img = Image.open(io.BytesIO(image_bytes))
-            # OCR simples com conversao para escala de cinza e autocontraste.
-            gray = ImageOps.grayscale(img)
-            enhanced = ImageOps.autocontrast(gray)
-            text = pytesseract.image_to_string(enhanced, lang="por+eng")
-            return text or ""
+            # Tenta OCR em multiplas rotacoes/pre-processamentos (foto pode vir de lado).
+            candidates = []
+            base = ImageOps.exif_transpose(img)
+            for angle in (0, 90, 180, 270):
+                rotated = base.rotate(angle, expand=True)
+                gray = ImageOps.grayscale(rotated)
+                upscaled = gray.resize(
+                    (max(1, gray.width * 2), max(1, gray.height * 2)),
+                    resample=Image.Resampling.LANCZOS,
+                )
+                enhanced = ImageOps.autocontrast(upscaled)
+                bw = enhanced.point(lambda p: 255 if p > 170 else 0)
+
+                for sample in (enhanced, bw):
+                    try:
+                        txt = pytesseract.image_to_string(sample, lang="por+eng", config="--psm 6")
+                    except Exception:
+                        txt = ""
+                    if txt:
+                        candidates.append(txt)
+
+            if not candidates:
+                return ""
+
+            # Escolhe texto com mais sinais de comprovante.
+            def _quality(t: str) -> tuple:
+                norm = _normalize_text(t)
+                hits = 0
+                for token in ("DESKTOP", "ASSINATURA", "CLIENTE", "DATA", "NOME", "EQUIPAMENTO"):
+                    if token in norm:
+                        hits += 1
+                return (hits, len(t))
+
+            candidates.sort(key=_quality, reverse=True)
+            return candidates[0]
         except Exception:
             return ""
+
+    def _score_receipt_layout(image_bytes: bytes):
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return 0.0, []
+
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img = ImageOps.exif_transpose(img)
+            gray = ImageOps.grayscale(img)
+
+            # Reduz custo mantendo estrutura global.
+            max_side = max(gray.width, gray.height)
+            if max_side > 1200:
+                scale = 1200.0 / float(max_side)
+                gray = gray.resize(
+                    (max(1, int(gray.width * scale)), max(1, int(gray.height * scale))),
+                    resample=Image.Resampling.LANCZOS,
+                )
+
+            bw = ImageOps.autocontrast(gray).point(lambda p: 255 if p > 170 else 0, mode="1")
+            w, h = bw.size
+            if w < 80 or h < 80:
+                return 0.0, []
+
+            px = bw.load()
+            row_dark = [0] * h
+            col_dark = [0] * w
+            dark_total = 0
+            for y in range(h):
+                rd = 0
+                for x in range(w):
+                    if px[x, y] == 0:
+                        rd += 1
+                        col_dark[x] += 1
+                row_dark[y] = rd
+                dark_total += rd
+
+            dark_ratio = dark_total / float(w * h)
+            h_lines = sum(1 for v in row_dark if v >= int(w * 0.55))
+            v_lines = sum(1 for v in col_dark if v >= int(h * 0.45))
+
+            score = 0.0
+            motivos = []
+            if 0.03 <= dark_ratio <= 0.40:
+                score += 0.20
+                motivos.append("densidade de tracos compativel com formulario")
+            if h_lines >= 6:
+                score += 0.25
+                motivos.append("multiplas linhas horizontais detectadas")
+            if v_lines >= 4:
+                score += 0.20
+                motivos.append("multiplas linhas verticais detectadas")
+            if h_lines >= 10 and v_lines >= 6:
+                score += 0.15
+                motivos.append("estrutura de tabela forte detectada")
+
+            return min(score, 1.0), motivos
+        except Exception:
+            return 0.0, []
 
     def _extract_fields(raw_text: str) -> dict:
         fields = {}
@@ -1082,6 +1173,16 @@ def create_api_app():
             raw_text = _ocr_extract_text(image_bytes)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
+
+            if not raw_text.strip():
+                layout_score, layout_motivos = _score_receipt_layout(image_bytes)
+                if layout_score >= 0.55:
+                    valido = True
+                    score = max(score, layout_score)
+                    motivos = (layout_motivos + ["validacao visual aplicada sem OCR"])[:8]
+                else:
+                    motivos = ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+
             texto_curto = " ".join(raw_text.split())[:280]
 
             return jsonify(
