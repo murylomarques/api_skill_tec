@@ -24,6 +24,7 @@ import argparse
 import io
 import base64
 import binascii
+import json
 import re
 import unicodedata
 from urllib.parse import unquote
@@ -794,10 +795,20 @@ def create_api_app():
         value = re.sub(r"[}\])\s]+$", "", value)
         value = value.strip()
 
+        # Converte URLs escapadas comuns de payload JSON serializado.
+        value = value.replace("\\/", "/")
+        if value.lower().startswith(("http:\\\\", "https:\\\\")):
+            value = value.replace("\\", "")
+
         # Se vier texto com URL no meio, extrai a primeira URL.
         m_url = re.search(r"https?://[^\s\"'<>]+", value, flags=re.IGNORECASE)
         if m_url:
             value = m_url.group(0).rstrip(".,;:!?)]}\"'")
+        else:
+            # URL ainda escapada (https:\/\/...).
+            m_url_escaped = re.search(r"https?:\\/\\/[^\s\"'<>]+", value, flags=re.IGNORECASE)
+            if m_url_escaped:
+                value = m_url_escaped.group(0).replace("\\/", "/").rstrip(".,;:!?)]}\"'")
 
         # URL percent-encoded inteira.
         if value.lower().startswith(("http%3a", "https%3a")):
@@ -867,11 +878,11 @@ def create_api_app():
         if "$UPLOAD_BASE64(" in upper or "{#" in normalized:
             raise ValueError("placeholders nao resolvidos no campo 'image_url'")
 
-        if normalized.startswith(("http://", "https://")):
+        if normalized.lower().startswith(("http://", "https://")):
             return _download_image_bytes_from_url(normalized, mime_type, extra_headers=extra_headers)
 
         # data URI: data:image/png;base64,AAAA...
-        if normalized.startswith("data:"):
+        if normalized.lower().startswith("data:"):
             if "," not in normalized:
                 raise ValueError("data URI invalida")
             _, b64payload = normalized.split(",", 1)
@@ -981,7 +992,21 @@ def create_api_app():
     @app.post("/validar-comprovante")
     @app.post("/api/validar-comprovante")
     def validar_comprovante():
-        body = request.get_json(silent=True) or {}
+        raw_payload = request.get_data(cache=True, as_text=True) or ""
+        parsed_json = request.get_json(silent=True)
+        body = parsed_json if isinstance(parsed_json, dict) else {}
+
+        if not body and raw_payload:
+            # Alguns conectores enviam JSON como texto.
+            try:
+                raw_obj = json.loads(raw_payload)
+                if isinstance(raw_obj, dict):
+                    body = raw_obj
+                elif isinstance(raw_obj, str):
+                    raw_payload = raw_obj
+            except Exception:
+                pass
+
         image_input = (
             body.get("image_url")
             or body.get("img_url")
@@ -996,10 +1021,8 @@ def create_api_app():
             image_input = str(image_input).strip()
 
         # fallback: alguns conectores enviam texto cru em vez de JSON.
-        if not image_input:
-            raw_payload = (request.get_data(cache=False, as_text=True) or "").strip()
-            if raw_payload:
-                image_input = raw_payload
+        if not image_input and raw_payload:
+            image_input = raw_payload.strip()
         mime_type = (body.get("mime_type") or "").strip()
         image_headers = body.get("image_headers") or {}
 
