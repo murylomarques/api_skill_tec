@@ -982,7 +982,24 @@ def create_api_app():
     @app.post("/api/validar-comprovante")
     def validar_comprovante():
         body = request.get_json(silent=True) or {}
-        image_input = (body.get("image_url") or "").strip()
+        image_input = (
+            body.get("image_url")
+            or body.get("img_url")
+            or body.get("imageUrl")
+            or body.get("url")
+            or body.get("file_url")
+            or ""
+        )
+        if isinstance(image_input, str):
+            image_input = image_input.strip()
+        else:
+            image_input = str(image_input).strip()
+
+        # fallback: alguns conectores enviam texto cru em vez de JSON.
+        if not image_input:
+            raw_payload = (request.get_data(cache=False, as_text=True) or "").strip()
+            if raw_payload:
+                image_input = raw_payload
         mime_type = (body.get("mime_type") or "").strip()
         image_headers = body.get("image_headers") or {}
 
