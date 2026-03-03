@@ -26,6 +26,7 @@ import base64
 import binascii
 import re
 import unicodedata
+from urllib.parse import unquote
 import requests
 from datetime import datetime, timezone
 from typing import Optional
@@ -781,6 +782,9 @@ def create_api_app():
         if not value:
             return value
 
+        # Remove caracteres de controle invisiveis que quebram o startswith.
+        value = "".join(ch for ch in value if ch >= " " or ch in "\t\r\n")
+
         # Remove wrappers/residuos comuns de templates.
         while value and value[0] in "{(" and value[-1] in "})":
             value = value[1:-1].strip()
@@ -788,7 +792,18 @@ def create_api_app():
         # Corta caracteres residuais no fim (ex.: "}" virando "%7D").
         value = re.sub(r"(%7D)+$", "", value, flags=re.IGNORECASE)
         value = re.sub(r"[}\])\s]+$", "", value)
-        return value.strip()
+        value = value.strip()
+
+        # Se vier texto com URL no meio, extrai a primeira URL.
+        m_url = re.search(r"https?://[^\s\"'<>]+", value, flags=re.IGNORECASE)
+        if m_url:
+            value = m_url.group(0).rstrip(".,;:!?)]}\"'")
+
+        # URL percent-encoded inteira.
+        if value.lower().startswith(("http%3a", "https%3a")):
+            value = unquote(value).strip()
+
+        return value
 
     def _infer_image_type_from_bytes(data: bytes) -> str:
         if not data:
