@@ -790,21 +790,52 @@ def create_api_app():
         value = re.sub(r"[}\])\s]+$", "", value)
         return value.strip()
 
+    def _infer_image_type_from_bytes(data: bytes) -> str:
+        if not data:
+            return ""
+        head = data[:32]
+        if head.startswith(b"\xFF\xD8\xFF"):
+            return "image/jpeg"
+        if head.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if head.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if head.startswith(b"BM"):
+            return "image/bmp"
+        if head.startswith((b"II*\x00", b"MM\x00*")):
+            return "image/tiff"
+        if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return "image/webp"
+        return ""
+
     def _download_image_bytes_from_url(image_url: str, mime_type: str):
-        resp = requests.get(image_url, timeout=20)
+        resp = requests.get(image_url, timeout=20, headers={"Accept": "image/*,*/*"})
         resp.raise_for_status()
+        payload = resp.content
         content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         expected = (mime_type or "").strip().lower()
+        detected = _infer_image_type_from_bytes(payload)
 
-        if expected and content_type and expected != content_type:
+        if expected and detected and expected != detected:
             # aceita mismatch comum (ex: image/jpg vs image/jpeg)
-            if not (expected.replace("jpg", "jpeg") == content_type.replace("jpg", "jpeg")):
-                raise ValueError(f"mime_type divergente: esperado {expected}, recebido {content_type}")
+            if not (expected.replace("jpg", "jpeg") == detected.replace("jpg", "jpeg")):
+                raise ValueError(f"mime_type divergente: esperado {expected}, recebido {detected}")
 
-        if not content_type.startswith("image/") and expected and not expected.startswith("image/"):
-            raise ValueError("arquivo recebido nao parece ser imagem")
+        # Alguns provedores retornam Content-Type incorreto, mas os bytes sao de imagem.
+        if detected:
+            return payload
 
-        return resp.content
+        # Se nao detectou imagem e veio HTML/texto, e provavelmente pagina de erro/login.
+        if content_type.startswith("text/html"):
+            raise ValueError(
+                "url retornou HTML (provavel link protegido/expirado). "
+                "envie URL publica direta da imagem ou base64"
+            )
+
+        if content_type and not content_type.startswith("image/"):
+            raise ValueError(f"arquivo recebido nao parece ser imagem (content-type: {content_type})")
+
+        raise ValueError("arquivo recebido nao parece ser imagem")
 
     def _decode_image_bytes(image_input: str, mime_type: str):
         normalized = _sanitize_image_input(image_input)
