@@ -22,6 +22,8 @@
 import os
 import argparse
 import io
+import base64
+import binascii
 import re
 import unicodedata
 import requests
@@ -774,7 +776,21 @@ def create_api_app():
         )
         return re.sub(r"\s+", " ", no_accents).strip().upper()
 
-    def _download_image_bytes(image_url: str, mime_type: str):
+    def _sanitize_image_input(image_input: str) -> str:
+        value = (image_input or "").strip().strip('"').strip("'")
+        if not value:
+            return value
+
+        # Remove wrappers/residuos comuns de templates.
+        while value and value[0] in "{(" and value[-1] in "})":
+            value = value[1:-1].strip()
+
+        # Corta caracteres residuais no fim (ex.: "}" virando "%7D").
+        value = re.sub(r"(%7D)+$", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"[}\])\s]+$", "", value)
+        return value.strip()
+
+    def _download_image_bytes_from_url(image_url: str, mime_type: str):
         resp = requests.get(image_url, timeout=20)
         resp.raise_for_status()
         content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -789,6 +805,35 @@ def create_api_app():
             raise ValueError("arquivo recebido nao parece ser imagem")
 
         return resp.content
+
+    def _decode_image_bytes(image_input: str, mime_type: str):
+        normalized = _sanitize_image_input(image_input)
+        if not normalized:
+            raise ValueError("campo 'image_url' vazio")
+
+        upper = normalized.upper()
+        if "$UPLOAD_BASE64(" in upper or "{#" in normalized:
+            raise ValueError("placeholders nao resolvidos no campo 'image_url'")
+
+        if normalized.startswith(("http://", "https://")):
+            return _download_image_bytes_from_url(normalized, mime_type)
+
+        # data URI: data:image/png;base64,AAAA...
+        if normalized.startswith("data:"):
+            if "," not in normalized:
+                raise ValueError("data URI invalida")
+            _, b64payload = normalized.split(",", 1)
+            try:
+                return base64.b64decode(b64payload, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError(f"base64 invalido em data URI: {e}")
+
+        # Base64 cru.
+        compact = re.sub(r"\s+", "", normalized)
+        try:
+            return base64.b64decode(compact, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("campo 'image_url' deve ser URL http(s), data URI ou base64")
 
     def _ocr_extract_text(image_bytes: bytes) -> str:
         try:
@@ -885,10 +930,10 @@ def create_api_app():
     @app.post("/api/validar-comprovante")
     def validar_comprovante():
         body = request.get_json(silent=True) or {}
-        image_url = (body.get("image_url") or "").strip()
+        image_input = (body.get("image_url") or "").strip()
         mime_type = (body.get("mime_type") or "").strip()
 
-        if not image_url:
+        if not image_input:
             return jsonify(
                 {
                     "ok": False,
@@ -901,7 +946,7 @@ def create_api_app():
             ), 400
 
         try:
-            image_bytes = _download_image_bytes(image_url, mime_type)
+            image_bytes = _decode_image_bytes(image_input, mime_type)
             raw_text = _ocr_extract_text(image_bytes)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
