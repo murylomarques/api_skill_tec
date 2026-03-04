@@ -994,6 +994,43 @@ def create_api_app():
                     resample=Image.Resampling.LANCZOS,
                 )
 
+            # Detecta maior regiao clara (papel) para evitar ruido do fundo escuro.
+            w0, h0 = gray.size
+            px0 = gray.load()
+            min_x, min_y = w0, h0
+            max_x, max_y = -1, -1
+            bright_count = 0
+            bright_cut = 185
+            for y in range(h0):
+                for x in range(w0):
+                    if px0[x, y] >= bright_cut:
+                        bright_count += 1
+                        if x < min_x:
+                            min_x = x
+                        if y < min_y:
+                            min_y = y
+                        if x > max_x:
+                            max_x = x
+                        if y > max_y:
+                            max_y = y
+
+            if bright_count == 0 or max_x <= min_x or max_y <= min_y:
+                return 0.0, ["area clara insuficiente para formulario"]
+
+            box_w = max_x - min_x + 1
+            box_h = max_y - min_y + 1
+            box_ratio = (box_w * box_h) / float(w0 * h0)
+            if box_ratio < 0.12:
+                return 0.0, ["area de documento insuficiente na imagem"]
+
+            pad_x = int(box_w * 0.03)
+            pad_y = int(box_h * 0.03)
+            left = max(0, min_x - pad_x)
+            top = max(0, min_y - pad_y)
+            right = min(w0, max_x + pad_x + 1)
+            bottom = min(h0, max_y + pad_y + 1)
+            gray = gray.crop((left, top, right, bottom))
+
             # Formulario costuma ter area clara relevante (papel), mesmo com fundo escuro.
             gray_hist = gray.histogram()
             total_px = float(sum(gray_hist)) or 1.0
