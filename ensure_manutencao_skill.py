@@ -982,12 +982,25 @@ def create_api_app():
                 bw = enhanced.point(lambda p: 255 if p > 170 else 0)
 
                 for sample in (enhanced, bw):
-                    try:
-                        txt = pytesseract.image_to_string(sample, lang="por+eng", config="--psm 6")
-                    except Exception:
-                        txt = ""
-                    if txt:
-                        candidates.append(txt)
+                    # Tentativas em cascata: alguns ambientes nao possuem dados de lingua "por".
+                    attempts = [
+                        {"lang": "por+eng", "config": "--oem 3 --psm 6"},
+                        {"lang": "eng", "config": "--oem 3 --psm 6"},
+                        {"lang": "por+eng", "config": "--oem 3 --psm 11"},
+                        {"lang": "eng", "config": "--oem 3 --psm 11"},
+                        {"lang": None, "config": "--oem 3 --psm 6"},
+                    ]
+                    for att in attempts:
+                        try:
+                            if att["lang"]:
+                                txt = pytesseract.image_to_string(sample, lang=att["lang"], config=att["config"])
+                            else:
+                                txt = pytesseract.image_to_string(sample, config=att["config"])
+                        except Exception:
+                            txt = ""
+                        if txt and txt.strip():
+                            candidates.append(txt)
+                            break
 
             if not candidates:
                 return _ocr_extract_text_via_ocrspace(image_bytes, image_url=image_url)
@@ -1269,16 +1282,26 @@ def create_api_app():
             raw_text = _ocr_extract_text(image_bytes, image_url=image_url_hint)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
+            layout_score, layout_motivos = _score_receipt_layout(image_bytes)
 
             if not raw_text.strip():
-                layout_score, layout_motivos = _score_receipt_layout(image_bytes)
-                # Modo estrito: sem OCR, nao aprova comprovante para evitar falso positivo.
-                valido = False
-                score = 0.0
-                motivos = (
-                    ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
-                    + (layout_motivos[:2] if layout_score > 0 else [])
-                )[:8]
+                motivos = ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+                if layout_score >= 0.55:
+                    # Fallback por estrutura visual quando OCR falha.
+                    valido = True
+                    score = max(layout_score, 0.65)
+                    motivos.append("classificado como comprovante pelo layout do formulario")
+                else:
+                    valido = False
+                    score = max(0.0, layout_score * 0.6)
+                    motivos.append("layout insuficiente para confirmar comprovante")
+                if layout_motivos:
+                    motivos.extend(layout_motivos[:3])
+            elif layout_score > 0:
+                # Reforca score textual quando o layout tambem e compativel.
+                score = min(1.0, max(score, score + (layout_score * 0.25)))
+                if layout_motivos:
+                    motivos.append("layout compativel com formulario")
 
             texto_curto = " ".join(raw_text.split())[:280]
 
