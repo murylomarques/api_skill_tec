@@ -937,8 +937,9 @@ def create_api_app():
         try:
             payload = {"apikey": api_key, "language": "por", "OCREngine": "2", "isOverlayRequired": "false"}
             if image_url and image_url.lower().startswith(("http://", "https://")):
+                # imageurl nesse provedor responde em GET.
                 payload["url"] = image_url
-                resp = requests.post("https://api.ocr.space/parse/imageurl", data=payload, timeout=30)
+                resp = requests.get("https://api.ocr.space/parse/imageurl", params=payload, timeout=30)
             else:
                 files = {"file": ("comprovante.jpg", image_bytes)}
                 resp = requests.post("https://api.ocr.space/parse/image", data=payload, files=files, timeout=30)
@@ -1145,6 +1146,7 @@ def create_api_app():
         base_markers = [
             ("RETIRADA DE EQUIPAMENTO", 0.35, "titulo 'RETIRADA DE EQUIPAMENTO' encontrado"),
             ("DESKTOP", 0.15, "marca/cabecalho 'DESKTOP' encontrado"),
+            ("EQUIPAMENTO RETIRADO", 0.20, "campo 'equipamento retirado' encontrado"),
             ("CONDICAO DE DEVOLUCAO", 0.15, "secao de condicao/devolucao encontrada"),
             ("ASSINATURA DO CLIENTE", 0.10, "campo de assinatura encontrado"),
             ("NUMERO(S) PATRIMONIO", 0.10, "campo patrimonio encontrado"),
@@ -1177,7 +1179,7 @@ def create_api_app():
             motivos.append("faltou termo-chave de retirada/equipamento")
             score = min(score, 0.49)
         elif strong_hits >= 3:
-            score += 0.15
+            score += 0.20
             motivos.append("estrutura textual de comprovante detectada")
 
         score = min(score, 1.0)
