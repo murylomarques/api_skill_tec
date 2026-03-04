@@ -62,13 +62,10 @@ SF_PASSWORD = os.getenv("SF_PASSWORD", "")
 OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "").strip()
 # =======================================
 
-# Persistencia opcional do resultado de validacao (WhatsApp disparos)
-VALIDATION_DB_HOST = os.getenv("VALIDATION_DB_HOST", "172.29.5.3").strip()
-VALIDATION_DB_NAME = os.getenv("VALIDATION_DB_NAME", "db_Melhoria_continua_operacoes").strip()
-VALIDATION_DB_USER = os.getenv("VALIDATION_DB_USER", "Geovane.Faria").strip()
-VALIDATION_DB_PASSWORD = os.getenv("VALIDATION_DB_PASSWORD", "GeovaneDesk2@25").strip()
-VALIDATION_DB_SCHEMA = os.getenv("VALIDATION_DB_SCHEMA", "dw_bi_sf").strip()
-VALIDATION_DB_TABLE = os.getenv("VALIDATION_DB_TABLE", "sa_disparos_whatsapp").strip()
+# Persistencia opcional do resultado de validacao (PostgreSQL)
+VALIDATION_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+VALIDATION_DB_SCHEMA = os.getenv("VALIDATION_DB_SCHEMA", "public").strip()
+VALIDATION_DB_TABLE = os.getenv("VALIDATION_DB_TABLE", "agendamentos_servicos").strip()
 
 # ============================================================
 # MAPA DE GRUPOS (SEU PADRÃO) -> MasterLabel exato da Skill
@@ -791,26 +788,21 @@ def create_api_app():
     def _normalize_phone(phone_value) -> str:
         return re.sub(r"\D", "", str(phone_value or ""))
 
-    def _persist_validation_score(telefone_value, score_value: float, url_value: str):
+    def _persist_validation_score(telefone_value, protocolo_value, score_value: float, url_value: str):
         telefone = _normalize_phone(telefone_value)
+        protocolo = (protocolo_value or "").strip()
         if not telefone:
-            return {"attempted": False, "updated": False, "error": "contato/telefone ausente"}
+            telefone = ""
+        if not telefone and not protocolo:
+            return {"attempted": False, "updated": False, "error": "contato/telefone e protocolo ausentes"}
 
-        db_cfg = [
-            VALIDATION_DB_HOST,
-            VALIDATION_DB_NAME,
-            VALIDATION_DB_USER,
-            VALIDATION_DB_PASSWORD,
-            VALIDATION_DB_SCHEMA,
-            VALIDATION_DB_TABLE,
-        ]
-        if any(not x for x in db_cfg):
+        if not VALIDATION_DATABASE_URL or not VALIDATION_DB_SCHEMA or not VALIDATION_DB_TABLE:
             return {"attempted": False, "updated": False, "error": "configuracao de banco incompleta"}
 
         try:
-            import pymysql
+            import psycopg
         except Exception:
-            return {"attempted": False, "updated": False, "error": "dependencia PyMySQL nao instalada"}
+            return {"attempted": False, "updated": False, "error": "dependencia psycopg nao instalada"}
 
         conn = None
         try:
@@ -824,44 +816,92 @@ def create_api_app():
                 variants.add("55" + telefone)
             last11 = telefone[-11:] if len(telefone) >= 11 else telefone
             variants = {v for v in variants if v}
-
-            conn = pymysql.connect(
-                host=VALIDATION_DB_HOST,
-                user=VALIDATION_DB_USER,
-                password=VALIDATION_DB_PASSWORD,
-                database=VALIDATION_DB_NAME,
-                charset="utf8mb4",
-                cursorclass=pymysql.cursors.DictCursor,
-                autocommit=False,
-            )
-            full_table = f"`{VALIDATION_DB_SCHEMA}`.`{VALIDATION_DB_TABLE}`"
+            conn = psycopg.connect(VALIDATION_DATABASE_URL, autocommit=False)
+            full_table = f"\"{VALIDATION_DB_SCHEMA}\".\"{VALIDATION_DB_TABLE}\""
             variants_list = sorted(variants)
             placeholders = ", ".join(["%s"] * len(variants_list))
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT id
-                    FROM {full_table}
-                    WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') IN ({placeholders})
-                       OR RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', ''), 11) = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (*variants_list, last11),
-                )
-                row = cur.fetchone()
-                if not row:
+                # Garante colunas de persistencia.
+                cur.execute(f"ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS score numeric(6,4) NULL")
+                cur.execute(f"ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS urlimg text NULL")
+
+                row = None
+                if protocolo:
                     cur.execute(
                         f"""
-                        INSERT INTO {full_table}
-                            (telefone, score, urlimg, telefone_disparado, numero_tentativas)
-                        VALUES
-                            (%s, %s, %s, %s, %s)
+                        SELECT id
+                        FROM {full_table}
+                        WHERE coalesce(protocolo, '') = %s
+                        ORDER BY id DESC
+                        LIMIT 1
                         """,
-                        (telefone, round(float(score_value), 4), (url_value or "")[:1000], 0, 0),
+                        (protocolo,),
                     )
+                    row = cur.fetchone()
+
+                if (not row) and variants_list:
+                    cur.execute(
+                        f"""
+                        SELECT id
+                        FROM {full_table}
+                        WHERE regexp_replace(coalesce(telefone_normalizado, ''), '[^0-9]', '', 'g') IN ({placeholders})
+                           OR regexp_replace(coalesce(telefone_contato_retirada, ''), '[^0-9]', '', 'g') IN ({placeholders})
+                           OR right(regexp_replace(coalesce(telefone_normalizado, ''), '[^0-9]', '', 'g'), 11) = %s
+                           OR right(regexp_replace(coalesce(telefone_contato_retirada, ''), '[^0-9]', '', 'g'), 11) = %s
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (*variants_list, *variants_list, last11, last11),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    insert_params = (protocolo or None, telefone or None, telefone or None, round(float(score_value), 4), (url_value or ""))
+                    inserted = None
+                    try:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {full_table}
+                                (protocolo, telefone_contato_retirada, telefone_normalizado, score, urlimg)
+                            VALUES
+                                (%s, %s, %s, %s, %s)
+                            RETURNING id
+                            """,
+                            insert_params,
+                        )
+                    except Exception as insert_error:
+                        err_text = str(insert_error)
+                        if "duplicate key value violates unique constraint" in err_text and "_pkey" in err_text:
+                            conn.rollback()
+                            with conn.cursor() as cur_retry:
+                                cur_retry.execute(f"ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS score numeric(6,4) NULL")
+                                cur_retry.execute(f"ALTER TABLE {full_table} ADD COLUMN IF NOT EXISTS urlimg text NULL")
+                                cur_retry.execute(
+                                    f"""
+                                    SELECT setval(
+                                        pg_get_serial_sequence('{VALIDATION_DB_SCHEMA}.{VALIDATION_DB_TABLE}', 'id'),
+                                        COALESCE((SELECT MAX(id) FROM {full_table}), 0) + 1,
+                                        false
+                                    )
+                                    """
+                                )
+                                cur_retry.execute(
+                                    f"""
+                                    INSERT INTO {full_table}
+                                        (protocolo, telefone_contato_retirada, telefone_normalizado, score, urlimg)
+                                    VALUES
+                                        (%s, %s, %s, %s, %s)
+                                    RETURNING id
+                                    """,
+                                    insert_params,
+                                )
+                                inserted = cur_retry.fetchone()
+                        else:
+                            raise
+                    if inserted is None:
+                        inserted = cur.fetchone()
                     conn.commit()
-                    return {"attempted": True, "updated": True, "inserted": True, "error": ""}
+                    return {"attempted": True, "updated": True, "inserted": True, "id": inserted[0], "error": ""}
 
                 cur.execute(
                     f"""
@@ -870,7 +910,7 @@ def create_api_app():
                         urlimg = %s
                     WHERE id = %s
                     """,
-                    (round(float(score_value), 4), (url_value or "")[:1000], row["id"]),
+                    (round(float(score_value), 4), (url_value or ""), row[0]),
                 )
             conn.commit()
             return {"attempted": True, "updated": True, "inserted": False, "error": ""}
@@ -1380,6 +1420,7 @@ def create_api_app():
             or body.get("Telefone")
             or ""
         )
+        protocolo = (body.get("protocolo") or "").strip()
 
         if not image_input:
             return jsonify(
@@ -1432,7 +1473,7 @@ def create_api_app():
                     motivos.append("layout compativel com formulario")
 
             texto_curto = " ".join(raw_text.split())[:280]
-            persistencia = _persist_validation_score(contato, score, image_url_recebida)
+            persistencia = _persist_validation_score(contato, protocolo, score, image_url_recebida)
             if persistencia.get("attempted") and not persistencia.get("updated") and persistencia.get("error"):
                 motivos = (motivos + [f"falha ao persistir score/urlimg: {persistencia['error']}"])[:8]
 
