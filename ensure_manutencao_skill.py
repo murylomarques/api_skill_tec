@@ -994,6 +994,13 @@ def create_api_app():
                     resample=Image.Resampling.LANCZOS,
                 )
 
+            # Formulario costuma ser claro (papel branco). Imagens escuras tendem a falso positivo.
+            gray_hist = gray.histogram()
+            total_px = float(sum(gray_hist)) or 1.0
+            avg_brightness = sum(i * c for i, c in enumerate(gray_hist)) / total_px
+            if avg_brightness < 115:
+                return 0.0, ["imagem muito escura para validacao visual segura"]
+
             bw = ImageOps.autocontrast(gray).point(lambda p: 255 if p > 170 else 0, mode="1")
             w, h = bw.size
             if w < 80 or h < 80:
@@ -1013,21 +1020,25 @@ def create_api_app():
                 dark_total += rd
 
             dark_ratio = dark_total / float(w * h)
+            # Em formularios impressos, linhas ocupam parte pequena da imagem.
+            if dark_ratio < 0.01 or dark_ratio > 0.24:
+                return 0.0, ["densidade de tracos fora do padrao de formulario"]
+
             h_lines = sum(1 for v in row_dark if v >= int(w * 0.55))
             v_lines = sum(1 for v in col_dark if v >= int(h * 0.45))
 
             score = 0.0
             motivos = []
-            if 0.03 <= dark_ratio <= 0.40:
+            if 0.02 <= dark_ratio <= 0.18:
                 score += 0.20
                 motivos.append("densidade de tracos compativel com formulario")
-            if h_lines >= 6:
+            if h_lines >= 8:
                 score += 0.25
                 motivos.append("multiplas linhas horizontais detectadas")
-            if v_lines >= 4:
+            if v_lines >= 5:
                 score += 0.20
                 motivos.append("multiplas linhas verticais detectadas")
-            if h_lines >= 10 and v_lines >= 6:
+            if h_lines >= 12 and v_lines >= 7:
                 score += 0.15
                 motivos.append("estrutura de tabela forte detectada")
 
@@ -1176,12 +1187,12 @@ def create_api_app():
 
             if not raw_text.strip():
                 layout_score, layout_motivos = _score_receipt_layout(image_bytes)
-                if layout_score >= 0.55:
+                if layout_score >= 0.75:
                     valido = True
                     score = max(score, layout_score)
                     motivos = (layout_motivos + ["validacao visual aplicada sem OCR"])[:8]
                 else:
-                    motivos = ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+                    motivos = layout_motivos[:2] or ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
 
             texto_curto = " ".join(raw_text.split())[:280]
 
