@@ -62,6 +62,14 @@ SF_PASSWORD = os.getenv("SF_PASSWORD", "")
 OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "").strip()
 # =======================================
 
+# Persistencia opcional do resultado de validacao (WhatsApp disparos)
+VALIDATION_DB_HOST = os.getenv("VALIDATION_DB_HOST", "172.29.5.3").strip()
+VALIDATION_DB_NAME = os.getenv("VALIDATION_DB_NAME", "db_Melhoria_continua_operacoes").strip()
+VALIDATION_DB_USER = os.getenv("VALIDATION_DB_USER", "Geovane.Faria").strip()
+VALIDATION_DB_PASSWORD = os.getenv("VALIDATION_DB_PASSWORD", "GeovaneDesk2@25").strip()
+VALIDATION_DB_SCHEMA = os.getenv("VALIDATION_DB_SCHEMA", "dw_bi_sf").strip()
+VALIDATION_DB_TABLE = os.getenv("VALIDATION_DB_TABLE", "sa_disparos_whatsapp").strip()
+
 # ============================================================
 # MAPA DE GRUPOS (SEU PADRÃO) -> MasterLabel exato da Skill
 # ============================================================
@@ -780,6 +788,100 @@ def create_api_app():
         )
         return re.sub(r"\s+", " ", no_accents).strip().upper()
 
+    def _normalize_phone(phone_value) -> str:
+        return re.sub(r"\D", "", str(phone_value or ""))
+
+    def _persist_validation_score(telefone_value, score_value: float, url_value: str):
+        telefone = _normalize_phone(telefone_value)
+        if not telefone:
+            return {"attempted": False, "updated": False, "error": "contato/telefone ausente"}
+
+        db_cfg = [
+            VALIDATION_DB_HOST,
+            VALIDATION_DB_NAME,
+            VALIDATION_DB_USER,
+            VALIDATION_DB_PASSWORD,
+            VALIDATION_DB_SCHEMA,
+            VALIDATION_DB_TABLE,
+        ]
+        if any(not x for x in db_cfg):
+            return {"attempted": False, "updated": False, "error": "configuracao de banco incompleta"}
+
+        try:
+            import pymysql
+        except Exception:
+            return {"attempted": False, "updated": False, "error": "dependencia PyMySQL nao instalada"}
+
+        conn = None
+        try:
+            variants = {telefone}
+            trimmed = telefone.lstrip("0")
+            if trimmed:
+                variants.add(trimmed)
+            if telefone.startswith("55") and len(telefone) > 11:
+                variants.add(telefone[2:])
+            if len(telefone) == 11:
+                variants.add("55" + telefone)
+            last11 = telefone[-11:] if len(telefone) >= 11 else telefone
+            variants = {v for v in variants if v}
+
+            conn = pymysql.connect(
+                host=VALIDATION_DB_HOST,
+                user=VALIDATION_DB_USER,
+                password=VALIDATION_DB_PASSWORD,
+                database=VALIDATION_DB_NAME,
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=False,
+            )
+            full_table = f"`{VALIDATION_DB_SCHEMA}`.`{VALIDATION_DB_TABLE}`"
+            variants_list = sorted(variants)
+            placeholders = ", ".join(["%s"] * len(variants_list))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id
+                    FROM {full_table}
+                    WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '') IN ({placeholders})
+                       OR RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', ''), 11) = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (*variants_list, last11),
+                )
+                row = cur.fetchone()
+                if not row:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {full_table}
+                            (telefone, score, urlimg, telefone_disparado, numero_tentativas)
+                        VALUES
+                            (%s, %s, %s, %s, %s)
+                        """,
+                        (telefone, round(float(score_value), 4), (url_value or "")[:1000], 0, 0),
+                    )
+                    conn.commit()
+                    return {"attempted": True, "updated": True, "inserted": True, "error": ""}
+
+                cur.execute(
+                    f"""
+                    UPDATE {full_table}
+                    SET score = %s,
+                        urlimg = %s
+                    WHERE id = %s
+                    """,
+                    (round(float(score_value), 4), (url_value or "")[:1000], row["id"]),
+                )
+            conn.commit()
+            return {"attempted": True, "updated": True, "inserted": False, "error": ""}
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {"attempted": True, "updated": False, "error": str(e)}
+        finally:
+            if conn:
+                conn.close()
+
     def _sanitize_image_input(image_input: str) -> str:
         value = (image_input or "").strip().strip('"').strip("'")
         if not value:
@@ -1264,12 +1366,20 @@ def create_api_app():
             image_input = image_input.strip()
         else:
             image_input = str(image_input).strip()
+        image_url_recebida = image_input
 
         # fallback: alguns conectores enviam texto cru em vez de JSON.
         if not image_input and raw_payload:
             image_input = _extract_url_candidate(raw_payload) or raw_payload.strip()
+            image_url_recebida = image_input
         mime_type = (body.get("mime_type") or "").strip()
         image_headers = body.get("image_headers") or {}
+        contato = (
+            body.get("contato")
+            or body.get("telefone")
+            or body.get("Telefone")
+            or ""
+        )
 
         if not image_input:
             return jsonify(
@@ -1280,6 +1390,7 @@ def create_api_app():
                     "motivos": ["campo 'image_url' e obrigatorio"],
                     "texto_detectado": "",
                     "campos": {},
+                    "urlimg": image_url_recebida,
                 }
             ), 400
 
@@ -1321,6 +1432,9 @@ def create_api_app():
                     motivos.append("layout compativel com formulario")
 
             texto_curto = " ".join(raw_text.split())[:280]
+            persistencia = _persist_validation_score(contato, score, image_url_recebida)
+            if persistencia.get("attempted") and not persistencia.get("updated") and persistencia.get("error"):
+                motivos = (motivos + [f"falha ao persistir score/urlimg: {persistencia['error']}"])[:8]
 
             return jsonify(
                 {
@@ -1330,6 +1444,8 @@ def create_api_app():
                     "motivos": motivos[:8],
                     "texto_detectado": texto_curto,
                     "campos": campos,
+                    "urlimg": image_url_recebida,
+                    "persistencia": persistencia,
                 }
             ), 200
         except Exception as e:
@@ -1341,6 +1457,7 @@ def create_api_app():
                     "motivos": [f"erro ao validar comprovante: {str(e)}"],
                     "texto_detectado": "",
                     "campos": {},
+                    "urlimg": image_url_recebida,
                 }
             ), 500
 
