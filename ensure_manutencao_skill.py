@@ -1225,12 +1225,13 @@ def create_api_app():
 
             if not raw_text.strip():
                 layout_score, layout_motivos = _score_receipt_layout(image_bytes)
-                if layout_score >= 0.75:
-                    valido = True
-                    score = max(score, layout_score)
-                    motivos = (layout_motivos + ["validacao visual aplicada sem OCR"])[:8]
-                else:
-                    motivos = layout_motivos[:2] or ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+                # Modo estrito: sem OCR, nao aprova comprovante para evitar falso positivo.
+                valido = False
+                score = 0.0
+                motivos = (
+                    ["nao foi possivel extrair texto da imagem (OCR indisponivel/ilegivel)"]
+                    + (layout_motivos[:2] if layout_score > 0 else [])
+                )[:8]
 
             texto_curto = " ".join(raw_text.split())[:280]
 
