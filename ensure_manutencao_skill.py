@@ -1038,6 +1038,17 @@ def create_api_app():
                     (max(1, int(gray.width * scale)), max(1, int(gray.height * scale))),
                     resample=Image.Resampling.LANCZOS,
                 )
+            gray = ImageOps.autocontrast(gray, cutoff=1)
+
+            def _percentile_from_hist(hist, q: float) -> int:
+                total = float(sum(hist)) or 1.0
+                target = total * max(0.0, min(1.0, q))
+                acc = 0.0
+                for idx, count in enumerate(hist):
+                    acc += float(count)
+                    if acc >= target:
+                        return idx
+                return 255
 
             # Detecta maior regiao clara (papel) para evitar ruido do fundo escuro.
             w0, h0 = gray.size
@@ -1045,7 +1056,8 @@ def create_api_app():
             min_x, min_y = w0, h0
             max_x, max_y = -1, -1
             bright_count = 0
-            bright_cut = 185
+            hist0 = gray.histogram()
+            bright_cut = max(145, min(205, _percentile_from_hist(hist0, 0.75)))
             for y in range(h0):
                 for x in range(w0):
                     if px0[x, y] >= bright_cut:
@@ -1059,32 +1071,31 @@ def create_api_app():
                         if y > max_y:
                             max_y = y
 
-            if bright_count == 0 or max_x <= min_x or max_y <= min_y:
-                return 0.0, ["area clara insuficiente para formulario"]
+            box_ratio = 0.0
+            if bright_count > 0 and max_x > min_x and max_y > min_y:
+                box_w = max_x - min_x + 1
+                box_h = max_y - min_y + 1
+                box_ratio = (box_w * box_h) / float(w0 * h0)
 
-            box_w = max_x - min_x + 1
-            box_h = max_y - min_y + 1
-            box_ratio = (box_w * box_h) / float(w0 * h0)
-            if box_ratio < 0.12:
-                return 0.0, ["area de documento insuficiente na imagem"]
-
-            pad_x = int(box_w * 0.03)
-            pad_y = int(box_h * 0.03)
-            left = max(0, min_x - pad_x)
-            top = max(0, min_y - pad_y)
-            right = min(w0, max_x + pad_x + 1)
-            bottom = min(h0, max_y + pad_y + 1)
-            gray = gray.crop((left, top, right, bottom))
+                if box_ratio >= 0.10:
+                    pad_x = int(box_w * 0.03)
+                    pad_y = int(box_h * 0.03)
+                    left = max(0, min_x - pad_x)
+                    top = max(0, min_y - pad_y)
+                    right = min(w0, max_x + pad_x + 1)
+                    bottom = min(h0, max_y + pad_y + 1)
+                    gray = gray.crop((left, top, right, bottom))
 
             # Formulario costuma ter area clara relevante (papel), mesmo com fundo escuro.
             gray_hist = gray.histogram()
             total_px = float(sum(gray_hist)) or 1.0
-            bright_px = float(sum(gray_hist[190:]))
+            p70 = _percentile_from_hist(gray_hist, 0.70)
+            bright_px = float(sum(gray_hist[max(150, p70):]))
             bright_ratio = bright_px / total_px
-            if bright_ratio < 0.14:
+            if bright_ratio < 0.12:
                 return 0.0, ["area clara insuficiente para formulario"]
 
-            bw = ImageOps.autocontrast(gray).point(lambda p: 255 if p > 170 else 0, mode="1")
+            bw = ImageOps.autocontrast(gray).point(lambda p: 255 if p > 165 else 0, mode="1")
             w, h = bw.size
             if w < 80 or h < 80:
                 return 0.0, []
@@ -1104,26 +1115,32 @@ def create_api_app():
 
             dark_ratio = dark_total / float(w * h)
             # Em formularios impressos, linhas ocupam parte pequena da imagem.
-            if dark_ratio < 0.01 or dark_ratio > 0.24:
+            if dark_ratio < 0.008 or dark_ratio > 0.35:
                 return 0.0, ["densidade de tracos fora do padrao de formulario"]
 
-            h_lines = sum(1 for v in row_dark if v >= int(w * 0.55))
-            v_lines = sum(1 for v in col_dark if v >= int(h * 0.45))
+            h_lines = sum(1 for v in row_dark if v >= int(w * 0.45))
+            v_lines = sum(1 for v in col_dark if v >= int(h * 0.35))
 
             score = 0.0
             motivos = []
-            if 0.02 <= dark_ratio <= 0.18:
+            if 0.01 <= dark_ratio <= 0.30:
                 score += 0.20
                 motivos.append("densidade de tracos compativel com formulario")
+            if bright_ratio >= 0.20:
+                score += 0.20
+                motivos.append("area clara compativel com documento fotografado")
             if h_lines >= 8:
                 score += 0.25
                 motivos.append("multiplas linhas horizontais detectadas")
-            if v_lines >= 5:
+            if v_lines >= 4:
                 score += 0.20
                 motivos.append("multiplas linhas verticais detectadas")
-            if h_lines >= 12 and v_lines >= 7:
+            if h_lines >= 12 and v_lines >= 6:
                 score += 0.15
                 motivos.append("estrutura de tabela forte detectada")
+            if box_ratio >= 0.10:
+                score += 0.10
+                motivos.append("regiao principal de documento detectada")
 
             return min(score, 1.0), motivos
         except Exception:
