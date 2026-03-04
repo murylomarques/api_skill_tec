@@ -58,6 +58,8 @@ SF_CLIENT_ID = os.getenv("SF_CLIENT_ID", "")
 SF_CLIENT_SECRET = os.getenv("SF_CLIENT_SECRET", "")
 SF_USERNAME = os.getenv("SF_USERNAME", "")
 SF_PASSWORD = os.getenv("SF_PASSWORD", "")
+# OCR externo opcional (recomendado configurar sua propria chave).
+OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "").strip()
 # =======================================
 
 # ============================================================
@@ -927,12 +929,41 @@ def create_api_app():
         except (binascii.Error, ValueError):
             raise ValueError("campo 'image_url' deve ser URL http(s), data URI ou base64")
 
-    def _ocr_extract_text(image_bytes: bytes) -> str:
+    def _ocr_extract_text_via_ocrspace(image_bytes: bytes, image_url: str = "") -> str:
+        api_key = OCR_SPACE_API_KEY or "helloworld"
+        if not api_key:
+            return ""
+
+        try:
+            payload = {"apikey": api_key, "language": "por", "OCREngine": "2", "isOverlayRequired": "false"}
+            if image_url and image_url.lower().startswith(("http://", "https://")):
+                payload["url"] = image_url
+                resp = requests.post("https://api.ocr.space/parse/imageurl", data=payload, timeout=30)
+            else:
+                files = {"file": ("comprovante.jpg", image_bytes)}
+                resp = requests.post("https://api.ocr.space/parse/image", data=payload, files=files, timeout=30)
+
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            if data.get("IsErroredOnProcessing"):
+                return ""
+
+            parsed = data.get("ParsedResults") or []
+            texts = []
+            for item in parsed:
+                txt = (item or {}).get("ParsedText") or ""
+                if txt.strip():
+                    texts.append(txt)
+            return "\n".join(texts).strip()
+        except Exception:
+            return ""
+
+    def _ocr_extract_text(image_bytes: bytes, image_url: str = "") -> str:
         try:
             from PIL import Image, ImageOps
             import pytesseract
         except Exception:
-            return ""
+            return _ocr_extract_text_via_ocrspace(image_bytes, image_url=image_url)
 
         try:
             img = Image.open(io.BytesIO(image_bytes))
@@ -958,7 +989,7 @@ def create_api_app():
                         candidates.append(txt)
 
             if not candidates:
-                return ""
+                return _ocr_extract_text_via_ocrspace(image_bytes, image_url=image_url)
 
             # Escolhe texto com mais sinais de comprovante.
             def _quality(t: str) -> tuple:
@@ -972,7 +1003,7 @@ def create_api_app():
             candidates.sort(key=_quality, reverse=True)
             return candidates[0]
         except Exception:
-            return ""
+            return _ocr_extract_text_via_ocrspace(image_bytes, image_url=image_url)
 
     def _score_receipt_layout(image_bytes: bytes):
         try:
@@ -1132,9 +1163,22 @@ def create_api_app():
             score += 0.05
             motivos.append("padrao de data detectado")
 
-        if "RETIRADA" not in norm or "EQUIPAMENTO" not in norm:
+        strong_tokens = [
+            "ASSINATURA DO CLIENTE",
+            "EQUIPAMENTO RETIRADO",
+            "TECNICO RESPONSAVEL",
+            "CPF",
+            "NOME",
+            "DESKTOP",
+        ]
+        strong_hits = sum(1 for t in strong_tokens if t in norm)
+
+        if ("RETIRADA" not in norm or "EQUIPAMENTO" not in norm) and strong_hits < 3:
             motivos.append("faltou termo-chave de retirada/equipamento")
             score = min(score, 0.49)
+        elif strong_hits >= 3:
+            score += 0.15
+            motivos.append("estrutura textual de comprovante detectada")
 
         score = min(score, 1.0)
         valido = score >= 0.60
@@ -1219,7 +1263,8 @@ def create_api_app():
                 else:
                     raise
 
-            raw_text = _ocr_extract_text(image_bytes)
+            image_url_hint = image_input if isinstance(image_input, str) and image_input.lower().startswith(("http://", "https://")) else ""
+            raw_text = _ocr_extract_text(image_bytes, image_url=image_url_hint)
             valido, score, motivos = _score_receipt_like(raw_text)
             campos = _extract_fields(raw_text)
 
