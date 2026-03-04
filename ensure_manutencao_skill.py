@@ -994,12 +994,13 @@ def create_api_app():
                     resample=Image.Resampling.LANCZOS,
                 )
 
-            # Formulario costuma ser claro (papel branco). Imagens escuras tendem a falso positivo.
+            # Formulario costuma ter area clara relevante (papel), mesmo com fundo escuro.
             gray_hist = gray.histogram()
             total_px = float(sum(gray_hist)) or 1.0
-            avg_brightness = sum(i * c for i, c in enumerate(gray_hist)) / total_px
-            if avg_brightness < 115:
-                return 0.0, ["imagem muito escura para validacao visual segura"]
+            bright_px = float(sum(gray_hist[190:]))
+            bright_ratio = bright_px / total_px
+            if bright_ratio < 0.14:
+                return 0.0, ["area clara insuficiente para formulario"]
 
             bw = ImageOps.autocontrast(gray).point(lambda p: 255 if p > 170 else 0, mode="1")
             w, h = bw.size
