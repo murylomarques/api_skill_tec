@@ -73,56 +73,59 @@ VALIDATION_DB_TABLE = os.getenv("VALIDATION_DB_TABLE", "agendamentos_servicos").
 GROUPS_MAP = {
     "Ativação": [
         "Ativação",
-        "Chip",
-        "Mesh",
         "PME",
-        "TV",
     ],
     "Manutenção Corretiva": [
-        "Chip",
         "Manutenção",
         "Manutenção Garantia",
-        "Mesh",
         "MotoDesk",
         "PME",
-        "TV",
         "OS critica",
     ],
     "Manutenção Preventiva": [
         "Manutenção",
-        "Mesh",
         "PME",
-        "TV",
     ],
     "Outros": [
         "Alteração de plano",
-        "Chip",
-        "Mesh",
         "Migração",
         "Migração - Zhone",
         "PME",
         "Serviços Adicionais",
-        "TV",
     ],
     "Mudança": [
-        "Chip",
-        "Mesh",
         "Mudança de endereço",
         "PME",
-        "TV",
         "OS critica",
     ],
     "Retirada": [
-        "Chip",
         "MotoDesk",
         "PME",
         "Retirada de Equipamento - Compulsório",
         "Retirada de Equipamento - Voluntário",
+    ],
+    "TV": [
         "TV",
+    ],
+    "Chip": [
+        "Chip",
+    ],
+    "Mesh": [
+        "Mesh",
     ],
 }
 
-GROUP_ORDER = ["Ativação", "Manutenção Corretiva", "Manutenção Preventiva", "Outros", "Mudança", "Retirada"]
+GROUP_ORDER = [
+    "Ativação",
+    "Manutenção Corretiva",
+    "Manutenção Preventiva",
+    "Outros",
+    "Mudança",
+    "Retirada",
+    "TV",
+    "Chip",
+    "Mesh",
+]
 
 # =========================
 # CORES (ANSI)
@@ -1929,8 +1932,8 @@ if __name__ == "__main__":
 # -------------------------
 # Quando ele listar:
 #   SKILLS DO GRUPO 'Retirada' ...
-#   01) Chip
-#   02) MotoDesk
+#   01) MotoDesk
+#   02) PME
 #   ...
 #
 # Você digita:
